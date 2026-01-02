@@ -1,32 +1,32 @@
-# ManiGaussian Semantic + Grasp Transfer Summary
+# ManiGaussian 语义与抓取迁移总结
 
-## Current Capabilities (What Works)
+## 当前效果与能力
 
-### Sparse Semantic Representation
-- Per-Gaussian sparse semantic coefficients are supported (top‑K weights + indices).
-- Dual semantic codebooks are available (CLIP + DINOv2) and are trained as parameters when enabled.
-- Sparse semantic rendering can be toggled via config and falls back to dense if needed.
+### 稀疏语义表示
+- 已支持 per‑Gaussian 的稀疏语义系数（Top‑K 权重 + 索引）。
+- 全局双码本（CLIP + DINOv2）在开启时作为可训练参数参与训练。
+- 语义渲染支持稀疏/稠密两种模式，可通过配置切换。
 
-### Teacher Feature Distillation (Training-Only)
-- Cached teacher features (CLIP/DINOv2) can be loaded from `.npz` or `.pt`.
-- Semantic distillation losses are computed with cosine similarity when enabled.
-- Optional projection heads can be used for stability.
+### 教师特征蒸馏（训练期）
+- 支持从 `.npz` 或 `.pt` 缓存加载 CLIP/DINOv2 的教师特征。
+- 语义蒸馏 loss 使用 cosine，相应权重可配置。
+- 可选投影头用于稳定训练。
 
-### Future-Frame Semantic Consistency (Optional)
-- When dynamics are enabled, predicted next-frame Gaussians can be rendered and compared against next-step teacher features.
-- This adds an optional future semantic loss term and logs additional timing.
+### 未来帧语义一致性（可选）
+- 当 dynamics 开启时，可对预测的下一帧高斯渲染语义并与下一帧教师特征对齐。
+- 该项是可选 loss，并带有额外耗时统计日志。
 
-### Grasp Transfer Evaluation (Script-Only)
-- `scripts/eval_grasp_transfer.py` evaluates grasp candidates using:
-  1) CLIP text similarity to localize target regions in `F_clip`.
-  2) DINO feature matching to retrieve grasp templates from a memory bank.
-  3) Optional world-model rollout scoring of candidate grasps.
+### 抓取迁移评估（脚本级）
+- `scripts/eval_grasp_transfer.py` 支持：
+  1) 用 CLIP 在 `F_clip` 上定位目标区域；
+  2) 在区域内用 DINO 特征匹配 memory bank 抓取模板；
+  3) 可选用 world‑model rollout 对候选抓取进行评分。
 
 ---
 
-## Training: Recommended Command
+## 训练指令
 
-Minimal 2‑step smoke test (requires CUDA + dataset + teacher caches):
+最小 2‑step smoke test（需要 CUDA + 数据集 + teacher cache）：
 
 ```bash
 python train.py \
@@ -37,7 +37,7 @@ python train.py \
   method.neural_renderer.lambda_sem_dino=1.0
 ```
 
-To include future semantic consistency (requires next‑frame caches + dynamics enabled):
+如需开启未来帧语义一致性（需要 next‑frame cache + dynamics）：
 
 ```bash
 python train.py \
@@ -51,21 +51,21 @@ python train.py \
   method.neural_renderer.lambda_sem_dino=1.0
 ```
 
-Expected log lines (examples):
+预期日志示例：
 ```
 L_sem_clip: 0.xxx | L_sem_dino: 0.xxx | L_sem_future: 0.xxx | T_sem_future: 0.0xxs
 ```
 
 ---
 
-## Evaluation: Grasp Transfer Script
+## 评估指令（抓取迁移）
 
-### Inputs
-- `clip_feat` cache: `.npz`/`.pt` with key `clip_feat` (H, W, D_clip)
-- `dino_feat` cache: `.npz`/`.pt` with key `dino_feat` (H, W, D_dino)
-- Memory bank: `.npz`/`.pt` with keys `dino_feature` (M, D_dino) and `grasp_pose` (M, A)
+### 输入格式
+- `clip_feat` 缓存：`.npz/.pt`，key 为 `clip_feat`，shape (H, W, D_clip)
+- `dino_feat` 缓存：`.npz/.pt`，key 为 `dino_feat`，shape (H, W, D_dino)
+- memory bank：`.npz/.pt`，包含 `dino_feature` (M, D_dino) 和 `grasp_pose` (M, A)
 
-### Run (no rollout)
+### 不使用 rollout 的评估
 ```bash
 python scripts/eval_grasp_transfer.py \
   --clip-cache /path/to/clip_feat.npz \
@@ -75,7 +75,7 @@ python scripts/eval_grasp_transfer.py \
   --output /tmp/grasp_candidates.json
 ```
 
-### Run (with world‑model rollout)
+### 启用 world‑model rollout 评分
 ```bash
 python scripts/eval_grasp_transfer.py \
   --clip-cache /path/to/clip_feat.npz \
@@ -91,12 +91,12 @@ python scripts/eval_grasp_transfer.py \
   --output /tmp/grasp_candidates.json
 ```
 
-Outputs:
-- JSON list of candidate grasps with scores and poses, sorted by score.
+输出：
+- JSON 列表，包含候选抓取姿态与评分，按分数排序。
 
 ---
 
-## Notes / Requirements
-- Sparse semantic rendering requires rebuilding the CUDA rasterizer extension if using the sparse mode.
-- Teacher caches must be present and correctly keyed for semantic distillation losses to be non‑zero.
-- CLIP/DINO model weights must be available when running the evaluation script.
+## 注意事项
+- 稀疏语义渲染需要 CUDA rasterizer 扩展支持；如开启稀疏模式，请先编译扩展。
+- 教师特征缓存必须存在且 key 名正确，loss 才会非零。
+- 评估脚本依赖 CLIP/DINO 权重与 PyTorch 环境。
