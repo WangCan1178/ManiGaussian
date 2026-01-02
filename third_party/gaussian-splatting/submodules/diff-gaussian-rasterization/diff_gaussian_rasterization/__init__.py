@@ -24,6 +24,7 @@ def rasterize_gaussians(
     sh,
     colors_precomp,
     language_feature_precomp,
+    language_feature_indices,
     opacities,
     scales,
     rotations,
@@ -36,6 +37,7 @@ def rasterize_gaussians(
         sh,
         colors_precomp,
         language_feature_precomp,
+        language_feature_indices,
         opacities,
         scales,
         rotations,
@@ -52,6 +54,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         sh,
         colors_precomp,
         language_feature_precomp,
+        language_feature_indices,
         opacities,
         scales,
         rotations,
@@ -65,6 +68,7 @@ class _RasterizeGaussians(torch.autograd.Function):
             means3D,
             colors_precomp,
             language_feature_precomp,
+            language_feature_indices,
             opacities,
             scales,
             rotations,
@@ -81,7 +85,10 @@ class _RasterizeGaussians(torch.autograd.Function):
             raster_settings.campos,
             raster_settings.prefiltered,
             raster_settings.debug,
-            raster_settings.include_feature
+            raster_settings.include_feature,
+            raster_settings.feature_dim,
+            raster_settings.topk_k,
+            raster_settings.use_sparse_feature,
         )
 
         # Invoke C++/CUDA rasterizer
@@ -99,7 +106,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         # Keep relevant tensors for backward
         ctx.raster_settings = raster_settings
         ctx.num_rendered = num_rendered
-        ctx.save_for_backward(colors_precomp, language_feature_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer)
+        ctx.save_for_backward(colors_precomp, language_feature_precomp, language_feature_indices, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer)
         return color, language_feature, radii
 
     @staticmethod
@@ -108,7 +115,7 @@ class _RasterizeGaussians(torch.autograd.Function):
         # Restore necessary values from context
         num_rendered = ctx.num_rendered
         raster_settings = ctx.raster_settings
-        colors_precomp, language_feature_precomp, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
+        colors_precomp, language_feature_precomp, language_feature_indices, means3D, scales, rotations, cov3Ds_precomp, radii, sh, geomBuffer, binningBuffer, imgBuffer = ctx.saved_tensors
 
         # Restructure args as C++ method expects them
         args = (raster_settings.bg,
@@ -116,6 +123,7 @@ class _RasterizeGaussians(torch.autograd.Function):
                 radii, 
                 colors_precomp, 
                 language_feature_precomp,
+                language_feature_indices,
                 scales, 
                 rotations, 
                 raster_settings.scale_modifier, 
@@ -134,7 +142,10 @@ class _RasterizeGaussians(torch.autograd.Function):
                 binningBuffer,
                 imgBuffer,
                 raster_settings.debug,
-                raster_settings.include_feature)
+                raster_settings.include_feature,
+                raster_settings.feature_dim,
+                raster_settings.topk_k,
+                raster_settings.use_sparse_feature)
 
         # Compute gradients for relevant tensors by invoking backward method
         if raster_settings.debug:
@@ -153,7 +164,8 @@ class _RasterizeGaussians(torch.autograd.Function):
             grad_means2D,
             grad_sh,
             grad_colors_precomp,
-            grad_language_feature_precomp, 
+            grad_language_feature_precomp,
+            None,
             grad_opacities,
             grad_scales,
             grad_rotations,
@@ -177,6 +189,9 @@ class GaussianRasterizationSettings(NamedTuple):
     prefiltered : bool
     debug : bool
     include_feature: bool
+    feature_dim: int
+    topk_k: int
+    use_sparse_feature: bool
 
 class GaussianRasterizer(nn.Module):
     def __init__(self, raster_settings):
@@ -194,7 +209,7 @@ class GaussianRasterizer(nn.Module):
             
         return visible
 
-    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, language_feature_precomp = None, scales = None, rotations = None, cov3D_precomp = None):
+    def forward(self, means3D, means2D, opacities, shs = None, colors_precomp = None, language_feature_precomp = None, language_feature_indices = None, scales = None, rotations = None, cov3D_precomp = None):
         
         raster_settings = self.raster_settings
 
@@ -210,6 +225,8 @@ class GaussianRasterizer(nn.Module):
             colors_precomp = torch.Tensor([])
         if language_feature_precomp is None:
             language_feature_precomp = torch.Tensor([])
+        if language_feature_indices is None:
+            language_feature_indices = torch.Tensor([])
         
         if scales is None:
             scales = torch.Tensor([])
@@ -225,10 +242,10 @@ class GaussianRasterizer(nn.Module):
             shs,
             colors_precomp,
             language_feature_precomp,
+            language_feature_indices,
             opacities,
             scales, 
             rotations,
             cov3D_precomp,
             raster_settings, 
         )
-

@@ -39,6 +39,7 @@ namespace CudaRasterizer
 			const float* shs,
 			const float* colors_precomp,
 			const float* language_feature_precomp,
+			const int* language_feature_indices,
 			const float* opacities,
 			const float* scales,
 			const float scale_modifier,
@@ -53,7 +54,10 @@ namespace CudaRasterizer
 			float* out_language_feature,
 			int* radii = nullptr,
 			bool debug = false,
-			bool include_feature = false);
+			bool include_feature = false,
+			int feature_dim = 0,
+			int topk_k = 0,
+			bool use_sparse_feature = false);
 
 		static void backward(
 			const int P, int D, int M, int R,
@@ -63,6 +67,7 @@ namespace CudaRasterizer
 			const float* shs,
 			const float* colors_precomp,
 			const float* language_feature_precomp,
+			const int* language_feature_indices,
 			const float* scales,
 			const float scale_modifier,
 			const float* rotations,
@@ -88,7 +93,10 @@ namespace CudaRasterizer
 			float* dL_dscale,
 			float* dL_drot,
 			bool debug,
-			bool include_feature);
+			bool include_feature,
+			int feature_dim,
+			int topk_k,
+			bool use_sparse_feature);
 	};
 };
 
