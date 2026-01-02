@@ -31,11 +31,15 @@ class PreprocessAgent(Agent):
         nerf_multi_view_rgb = replay_sample['nerf_multi_view_rgb']
         nerf_multi_view_depth = replay_sample['nerf_multi_view_depth']
         nerf_multi_view_camera = replay_sample['nerf_multi_view_camera']
+        nerf_multi_view_clip_feat = replay_sample.get('nerf_multi_view_clip_feat', None)
+        nerf_multi_view_dino_feat = replay_sample.get('nerf_multi_view_dino_feat', None)
 
         if 'nerf_next_multi_view_rgb' in replay_sample:
             nerf_next_multi_view_rgb = replay_sample['nerf_next_multi_view_rgb']
             nerf_next_multi_view_depth = replay_sample['nerf_next_multi_view_depth']
             nerf_next_multi_view_camera = replay_sample['nerf_next_multi_view_camera']
+            nerf_next_multi_view_clip_feat = replay_sample.get('nerf_next_multi_view_clip_feat', None)
+            nerf_next_multi_view_dino_feat = replay_sample.get('nerf_next_multi_view_dino_feat', None)
         lang_goal = replay_sample['lang_goal']
 
         if replay_sample['nerf_multi_view_rgb'] is None or replay_sample['nerf_multi_view_rgb'][0,0] is None:
@@ -57,11 +61,19 @@ class PreprocessAgent(Agent):
         replay_sample['nerf_multi_view_rgb'] = nerf_multi_view_rgb
         replay_sample['nerf_multi_view_depth'] = nerf_multi_view_depth
         replay_sample['nerf_multi_view_camera'] = nerf_multi_view_camera
+        if nerf_multi_view_clip_feat is not None:
+            replay_sample['nerf_multi_view_clip_feat'] = nerf_multi_view_clip_feat
+        if nerf_multi_view_dino_feat is not None:
+            replay_sample['nerf_multi_view_dino_feat'] = nerf_multi_view_dino_feat
 
         if 'nerf_next_multi_view_rgb' in replay_sample:
             replay_sample['nerf_next_multi_view_rgb'] = nerf_next_multi_view_rgb
             replay_sample['nerf_next_multi_view_depth'] = nerf_next_multi_view_depth
             replay_sample['nerf_next_multi_view_camera'] = nerf_next_multi_view_camera
+            if nerf_next_multi_view_clip_feat is not None:
+                replay_sample['nerf_next_multi_view_clip_feat'] = nerf_next_multi_view_clip_feat
+            if nerf_next_multi_view_dino_feat is not None:
+                replay_sample['nerf_next_multi_view_dino_feat'] = nerf_next_multi_view_dino_feat
         
         replay_sample['lang_goal'] = lang_goal
         self._replay_sample = replay_sample

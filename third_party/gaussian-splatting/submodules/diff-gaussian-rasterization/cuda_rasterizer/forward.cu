@@ -259,7 +259,7 @@ __global__ void preprocessCUDA(int P, int D, int M,
 // Main rasterization method. Collaboratively works on one tile per
 // block, each thread treats one pixel. Alternates between fetching 
 // and rasterizing data.
-template <uint32_t CHANNELS, uint32_t CHANNELS_language_feature>
+template <uint32_t CHANNELS>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
@@ -268,13 +268,17 @@ renderCUDA(
 	const float2* __restrict__ points_xy_image,
 	const float* __restrict__ features,
 	const float* __restrict__ language_feature,
+	const int* __restrict__ language_feature_indices,
 	const float4* __restrict__ conic_opacity,
 	float* __restrict__ final_T,
 	uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ bg_color,
 	float* __restrict__ out_color,
 	float* __restrict__ out_language_feature,
-	bool include_feature)
+	int feature_dim,
+	int topk_k,
+	bool include_feature,
+	bool use_sparse_feature)
 {
 	// Identify current tile and associated min/max pixel range.
 	auto block = cg::this_thread_block();
@@ -295,6 +299,14 @@ renderCUDA(
 	// Done threads can help with fetching, but don't rasterize
 	bool done = !inside;
 
+	if (include_feature && inside)
+	{
+		for (int ch = 0; ch < feature_dim; ch++)
+		{
+			out_language_feature[ch * H * W + pix_id] = 0.0f;
+		}
+	}
+
 	// Load start/end range of IDs to process in bit sorted list.
 	uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
 	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
@@ -310,7 +322,10 @@ renderCUDA(
 	uint32_t contributor = 0;
 	uint32_t last_contributor = 0;
 	float C[CHANNELS] = { 0 };
-	float F[CHANNELS_language_feature] = { 0 };
+	if (include_feature && feature_dim > MAX_LANGUAGE_FEATURES)
+		return;
+	if (use_sparse_feature && topk_k > MAX_TOPK)
+		return;
 
 	// Iterate over batches until all done or range is complete
 	for (int i = 0; i < rounds; i++, toDo -= BLOCK_SIZE)
@@ -366,8 +381,23 @@ renderCUDA(
 
 			if (include_feature)
 			{
-				for (int ch = 0; ch < CHANNELS_language_feature; ch++)
-					F[ch] += language_feature[collected_id[j] * CHANNELS_language_feature + ch] * alpha * T;
+				if (use_sparse_feature)
+				{
+					const int base = collected_id[j] * topk_k;
+					for (int k = 0; k < topk_k; k++)
+					{
+						const int ch = language_feature_indices[base + k];
+						const float val = language_feature[base + k];
+						out_language_feature[ch * H * W + pix_id] += val * alpha * T;
+					}
+				}
+				else
+				{
+					for (int ch = 0; ch < feature_dim; ch++)
+					{
+						out_language_feature[ch * H * W + pix_id] += language_feature[collected_id[j] * feature_dim + ch] * alpha * T;
+					}
+				}
 			}
 
 			T = test_T;
@@ -387,13 +417,9 @@ renderCUDA(
 		for (int ch = 0; ch < CHANNELS; ch++)
 			out_color[ch * H * W + pix_id] = C[ch] + T * bg_color[ch];
 		
-		if (include_feature) 
-		{
-			for (int ch = 0; ch < CHANNELS_language_feature; ch++)
-				out_language_feature[ch * H * W + pix_id] = F[ch]; //bg_color ???
-		}
-		
 	}
+
+}
 
 }
 
@@ -405,30 +431,38 @@ void FORWARD::render(
 	const float2* means2D,
 	const float* colors,
 	const float* language_feature,
+	const int* language_feature_indices,
 	const float4* conic_opacity,
 	float* final_T,
 	uint32_t* n_contrib,
 	const float* bg_color,
 	float* out_color,
 	float* out_language_feature,
-	bool include_feature)
+	int feature_dim,
+	int topk_k,
+	bool include_feature,
+	bool use_sparse_feature)
 {
 	// clock_t start = clock(); 
 	// printf("一共有 %d x %d 个block, %d x %d 个线程\n", grid.x, grid.y, block.x, block.y);
-	renderCUDA<NUM_CHANNELS, NUM_CHANNELS_language_feature> << <grid, block >> > (
+	renderCUDA<NUM_CHANNELS> << <grid, block >> > (
 		ranges,
 		point_list,
 		W, H,
 		means2D,
 		colors,
 		language_feature,
+		language_feature_indices,
 		conic_opacity,
 		final_T,
 		n_contrib,
 		bg_color,
 		out_color,
 		out_language_feature,
-		include_feature);
+		feature_dim,
+		topk_k,
+		include_feature,
+		use_sparse_feature);
 
 	// cudaDeviceSynchronize();   
 	

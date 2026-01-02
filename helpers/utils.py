@@ -352,6 +352,15 @@ def extract_obs(obs: Observation,
     else:
         nerf_multi_view_camera = None
 
+    if hasattr(obs, 'nerf_multi_view_clip_feat') and obs.nerf_multi_view_clip_feat is not None:
+        nerf_multi_view_clip_feat = obs.nerf_multi_view_clip_feat
+    else:
+        nerf_multi_view_clip_feat = None
+
+    if hasattr(obs, 'nerf_multi_view_dino_feat') and obs.nerf_multi_view_dino_feat is not None:
+        nerf_multi_view_dino_feat = obs.nerf_multi_view_dino_feat
+    else:
+        nerf_multi_view_dino_feat = None
 
     obs_dict = vars(obs)
     obs_dict = {k: v for k, v in obs_dict.items() if v is not None}
@@ -393,6 +402,8 @@ def extract_obs(obs: Observation,
     obs_dict['nerf_multi_view_rgb'] = nerf_multi_view_rgb
     obs_dict['nerf_multi_view_depth'] = nerf_multi_view_depth
     obs_dict['nerf_multi_view_camera'] = nerf_multi_view_camera
+    obs_dict['nerf_multi_view_clip_feat'] = nerf_multi_view_clip_feat
+    obs_dict['nerf_multi_view_dino_feat'] = nerf_multi_view_dino_feat
 
     # for next frame prediction
     if next_obs is not None:
@@ -400,10 +411,16 @@ def extract_obs(obs: Observation,
             obs_dict['nerf_next_multi_view_rgb'] = next_obs.nerf_multi_view_rgb
             obs_dict['nerf_next_multi_view_depth'] = next_obs.nerf_multi_view_depth
             obs_dict['nerf_next_multi_view_camera'] = next_obs.nerf_multi_view_camera
+            if hasattr(next_obs, 'nerf_multi_view_clip_feat'):
+                obs_dict['nerf_next_multi_view_clip_feat'] = next_obs.nerf_multi_view_clip_feat
+            if hasattr(next_obs, 'nerf_multi_view_dino_feat'):
+                obs_dict['nerf_next_multi_view_dino_feat'] = next_obs.nerf_multi_view_dino_feat
         else:
             obs_dict['nerf_next_multi_view_rgb'] = None
             obs_dict['nerf_next_multi_view_depth'] = None
             obs_dict['nerf_next_multi_view_camera'] = None
+            obs_dict['nerf_next_multi_view_clip_feat'] = None
+            obs_dict['nerf_next_multi_view_dino_feat'] = None
 
     # if next_obs is None, we do not add the next frame prediction
 

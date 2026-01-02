@@ -396,7 +396,7 @@ __global__ void preprocessCUDA(
 }
 
 // Backward version of the rendering procedure.
-template <uint32_t C, uint32_t F>
+template <uint32_t C>
 __global__ void __launch_bounds__(BLOCK_X * BLOCK_Y)
 renderCUDA(
 	const uint2* __restrict__ ranges,
@@ -407,6 +407,7 @@ renderCUDA(
 	const float4* __restrict__ conic_opacity,
 	const float* __restrict__ colors,
 	const float* __restrict__ language_feature,
+	const int* __restrict__ language_feature_indices,
 	const float* __restrict__ final_Ts,
 	const uint32_t* __restrict__ n_contrib,
 	const float* __restrict__ dL_dpixels,
@@ -416,7 +417,10 @@ renderCUDA(
 	float* __restrict__ dL_dopacity,
 	float* __restrict__ dL_dcolors,
 	float* __restrict__ dL_dlanguage_feature,
-	bool include_feature)
+	int feature_dim,
+	int topk_k,
+	bool include_feature,
+	bool use_sparse_feature)
 {
 	// We rasterize again. Compute necessary block info.
 	auto block = cg::this_thread_block();
@@ -430,6 +434,11 @@ renderCUDA(
 	const bool inside = pix.x < W&& pix.y < H;
 	const uint2 range = ranges[block.group_index().y * horizontal_blocks + block.group_index().x];
 
+	if (include_feature && feature_dim > MAX_LANGUAGE_FEATURES)
+		return;
+	if (use_sparse_feature && topk_k > MAX_TOPK)
+		return;
+
 	const int rounds = ((range.y - range.x + BLOCK_SIZE - 1) / BLOCK_SIZE);
 
 	bool done = !inside;
@@ -439,7 +448,6 @@ renderCUDA(
 	__shared__ float2 collected_xy[BLOCK_SIZE];
 	__shared__ float4 collected_conic_opacity[BLOCK_SIZE];
 	__shared__ float collected_colors[C * BLOCK_SIZE];
-	__shared__ float collected_feature[F * BLOCK_SIZE];
 
 
 	// In the forward, we stored the final value for T, the
@@ -461,13 +469,13 @@ renderCUDA(
 	float last_alpha = 0;
 	float last_color[C] = { 0 };
 
-	float accum_rec_F[F] = {0};
-	float dL_dpixel_F[F] = {0};
-	float last_language_feature[F] = {0};
+	float accum_rec_F[MAX_LANGUAGE_FEATURES] = {0};
+	float dL_dpixel_F[MAX_LANGUAGE_FEATURES] = {0};
+	float last_language_feature[MAX_LANGUAGE_FEATURES] = {0};
 
 	if (include_feature) {
 		if (inside)
-			for (int i = 0; i < F; i++)
+			for (int i = 0; i < feature_dim; i++)
 				dL_dpixel_F[i] = dL_dpixels_F[i * H * W + pix_id];
 	}
 	
@@ -491,8 +499,6 @@ renderCUDA(
 			collected_conic_opacity[block.thread_rank()] = conic_opacity[coll_id];
 			for (int i = 0; i < C; i++)
 				collected_colors[i * BLOCK_SIZE + block.thread_rank()] = colors[coll_id * C + i];
-			for (int i = 0; i < F; i++)
-				collected_feature[i * BLOCK_SIZE + block.thread_rank()] = language_feature[coll_id * F + i];
 		}
 		block.sync();
 
@@ -542,19 +548,33 @@ renderCUDA(
 			}
 
 			if (include_feature) {
-				for (int ch = 0; ch < F; ch++)
+				if (use_sparse_feature)
 				{
-					const float f = collected_feature[ch * BLOCK_SIZE + j];
-					// Update last color (to be used in the next iteration)
-					accum_rec_F[ch] = last_alpha * last_language_feature[ch] + (1.f - last_alpha) * accum_rec_F[ch];
-					last_language_feature[ch] = f;
+					const int base = global_id * topk_k;
+					for (int k = 0; k < topk_k; k++)
+					{
+						const int ch = language_feature_indices[base + k];
+						const float f = language_feature[base + k];
+						accum_rec_F[ch] = last_alpha * last_language_feature[ch] + (1.f - last_alpha) * accum_rec_F[ch];
+						last_language_feature[ch] = f;
 
-					const float dL_dchannel_F = dL_dpixel_F[ch];
-					dL_dalpha += (f - accum_rec_F[ch]) * dL_dchannel_F;
-					// Update the gradients w.r.t. color of the Gaussian. 
-					// Atomic, since this pixel is just one of potentially
-					// many that were affected by this Gaussian.
-					atomicAdd(&(dL_dlanguage_feature[global_id * F + ch]), dchannel_dcolor * dL_dchannel_F);
+						const float dL_dchannel_F = dL_dpixel_F[ch];
+						dL_dalpha += (f - accum_rec_F[ch]) * dL_dchannel_F;
+						atomicAdd(&(dL_dlanguage_feature[base + k]), dchannel_dcolor * dL_dchannel_F);
+					}
+				}
+				else
+				{
+					for (int ch = 0; ch < feature_dim; ch++)
+					{
+						const float f = language_feature[global_id * feature_dim + ch];
+						accum_rec_F[ch] = last_alpha * last_language_feature[ch] + (1.f - last_alpha) * accum_rec_F[ch];
+						last_language_feature[ch] = f;
+
+						const float dL_dchannel_F = dL_dpixel_F[ch];
+						dL_dalpha += (f - accum_rec_F[ch]) * dL_dchannel_F;
+						atomicAdd(&(dL_dlanguage_feature[global_id * feature_dim + ch]), dchannel_dcolor * dL_dchannel_F);
+					}
 				}
 			}
 
@@ -667,6 +687,7 @@ void BACKWARD::render(
 	const float4* conic_opacity,
 	const float* colors,
 	const float* language_feature,
+	const int* language_feature_indices,
 	const float* final_Ts,
 	const uint32_t* n_contrib,
 	const float* dL_dpixels,
@@ -676,10 +697,13 @@ void BACKWARD::render(
 	float* dL_dopacity,
 	float* dL_dcolors,
 	float* dL_dlanguage_feature,
-	bool include_feature)
+	int feature_dim,
+	int topk_k,
+	bool include_feature,
+	bool use_sparse_feature)
 {
 	// clock_t start = clock();   
-	renderCUDA<NUM_CHANNELS, NUM_CHANNELS_language_feature> << <grid, block >> >(
+	renderCUDA<NUM_CHANNELS> << <grid, block >> >(
 		ranges,
 		point_list,
 		W, H,
@@ -688,6 +712,7 @@ void BACKWARD::render(
 		conic_opacity,
 		colors,
 		language_feature,
+		language_feature_indices,
 		final_Ts,
 		n_contrib,
 		dL_dpixels,
@@ -697,7 +722,10 @@ void BACKWARD::render(
 		dL_dopacity,
 		dL_dcolors,
 		dL_dlanguage_feature,
-		include_feature);
+		feature_dim,
+		topk_k,
+		include_feature,
+		use_sparse_feature);
 
 	// cudaDeviceSynchronize();   
 	

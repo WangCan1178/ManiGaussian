@@ -12,6 +12,7 @@ from termcolor import colored, cprint
 
 from agents.manigaussian_bc.utils import PositionalEncoding, visualize_pcd
 from agents.manigaussian_bc.resnetfc import ResnetFC
+from agents.manigaussian_bc.semantic_utils import softmax_topk_renorm
 
 from typing import List
 import numpy as np
@@ -87,6 +88,20 @@ class GeneralizableGSEmbedNet(nn.Module):
         self.opacity_activation = torch.sigmoid
         self.rotation_activation = torch.nn.functional.normalize    # [B, N, 4]
         self.max_sh_degree = cfg.mlp.max_sh_degree
+        self.use_sparse_semantics = cfg.use_sparse_semantics
+        if self.use_sparse_semantics:
+            self.sem_L = cfg.sem_L
+            self.sem_K = cfg.sem_K
+            self.sem_logits = nn.Linear(
+                in_features=sum(split_dimensions),
+                out_features=self.sem_L,
+            )
+            self.sem_codebook_clip = nn.Parameter(
+                torch.randn(self.sem_L, cfg.D_clip)
+            )
+            self.sem_codebook_dino = nn.Parameter(
+                torch.randn(self.sem_L, cfg.D_dino)
+            )
 
         # we move xyz, rot
         self.use_dynamic_field = cfg.use_dynamic_field
@@ -252,6 +267,17 @@ class GeneralizableGSEmbedNet(nn.Module):
         data['opacity_maps'] = self.opacity_activation(opacity_maps)
         data['feature_maps'] = feature_maps # [B, N, 3]
 
+        if self.use_sparse_semantics:
+            sem_logits = self.sem_logits(latent)  # [B, N, L]
+            topk_val, topk_idx = softmax_topk_renorm(sem_logits, self.sem_K)
+            data['semantics'] = {
+                'w_logits': sem_logits,
+                'topk_val': topk_val,
+                'topk_idx': topk_idx,
+                'S_clip': self.sem_codebook_clip,
+                'S_dino': self.sem_codebook_dino,
+            }
+
         # Dynamic Modeling: predict next gaussian maps
         if self.use_dynamic_field: #and data['step'] >= self.warm_up:
 
@@ -302,6 +328,8 @@ class GeneralizableGSEmbedNet(nn.Module):
             data['next']['scale_maps'] = data['scale_maps'].detach()
             data['next']['opacity_maps'] = data['opacity_maps'].detach()
             data['next']['feature_maps'] = data['feature_maps'].detach()
+            if self.use_sparse_semantics and 'semantics' in data:
+                data['next']['semantics'] = data['semantics']
 
         return data
     

@@ -30,6 +30,7 @@ namespace BACKWARD
 		const float4* conic_opacity,
 		const float* colors,
 		const float* language_feature,
+		const int* language_feature_indices,
 		const float* final_Ts,
 		const uint32_t* n_contrib,
 		const float* dL_dpixels,
@@ -39,7 +40,10 @@ namespace BACKWARD
 		float* dL_dopacity,
 		float* dL_dcolors,
 		float* dL_dlanguage_feature,
-		bool include_feature);
+		int feature_dim,
+		int topk_k,
+		bool include_feature,
+		bool use_sparse_feature);
 
 	void preprocess(
 		int P, int D, int M,

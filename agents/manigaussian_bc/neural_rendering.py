@@ -1,3 +1,4 @@
+import time
 import torch
 import torch.nn as nn
 import numpy as np
@@ -86,6 +87,37 @@ class NeuralRenderer(nn.Module):
         print(colored(f"[NeuralRenderer] rgb loss weight: {self.lambda_rgb}", "cyan"))
 
         self.use_dynamic_field = cfg.use_dynamic_field
+        self.use_sparse_semantics = cfg.use_sparse_semantics
+        self.sem_render_mode = getattr(cfg, "sem_render_mode", "dense")
+        self.sem_L = cfg.sem_L if self.use_sparse_semantics else 0
+        self.sem_K = cfg.sem_K if self.use_sparse_semantics else 0
+        self.lambda_sem_clip = getattr(cfg, "lambda_sem_clip", 0.0)
+        self.lambda_sem_dino = getattr(cfg, "lambda_sem_dino", 0.0)
+        self.use_future_sem_loss = getattr(cfg, "use_future_sem_loss", False)
+        self.lambda_future_sem = getattr(cfg, "lambda_future_sem", 0.0)
+        self.use_proj_head = getattr(cfg, "use_proj_head", False)
+        self.proj_dim = getattr(cfg, "proj_dim", 256)
+        if self.use_sparse_semantics and self.use_proj_head:
+            self.proj_clip = nn.Linear(cfg.D_clip, self.proj_dim, bias=False)
+            self.proj_dino = nn.Linear(cfg.D_dino, self.proj_dim, bias=False)
+
+    def _semantic_distill_loss(self, pred, target):
+        """
+        pred/target: [B, H, W, D]
+        """
+        pred_flat = pred.reshape(-1, pred.shape[-1])
+        target_flat = target.reshape(-1, target.shape[-1])
+        cos = F.cosine_similarity(pred_flat, target_flat, dim=-1)
+        return (1.0 - cos).mean()
+
+    def _resize_teacher(self, feat, height, width):
+        if feat is None:
+            return None
+        if feat.shape[-3:-1] == (height, width):
+            return feat
+        feat_chw = feat.permute(0, 3, 1, 2)
+        feat_resized = F.interpolate(feat_chw, size=(height, width), mode='bilinear', align_corners=False)
+        return feat_resized.permute(0, 2, 3, 1)
 
     def _embed_loss_fn(self, render_embed, gt_embed):
         """
@@ -250,6 +282,8 @@ class NeuralRenderer(nn.Module):
     def forward(self, pcd, dec_fts, language, gt_rgb=None, gt_pose=None, gt_intrinsic=None, rgb=None, depth=None, camera_intrinsics=None, camera_extrinsics=None, 
                 focal=None, c=None, lang_goal=None, gt_depth=None,
                 next_gt_pose=None, next_gt_intrinsic=None, next_gt_rgb=None, step=None, action=None,
+                clip_feat=None, dino_feat=None,
+                next_clip_feat=None, next_dino_feat=None,
                 training=True):
         '''
         main forward function
@@ -269,6 +303,10 @@ class NeuralRenderer(nn.Module):
         next_render_novel = None
         render_embed = None
         gt_embed = None
+        loss_sem_clip = torch.tensor(0., device=rgb.device)
+        loss_sem_dino = torch.tensor(0., device=rgb.device)
+        loss_future_sem = torch.tensor(0., device=rgb.device)
+        future_sem_time = 0.0
 
         # create gt feature from foundation models
         with torch.no_grad():
@@ -319,6 +357,31 @@ class NeuralRenderer(nn.Module):
             else:
                 loss_embed = torch.tensor(0.)
 
+            if self.use_sparse_semantics and 'semantics' in data and (clip_feat is not None or dino_feat is not None):
+                weight_map = data['novel_view']['embed_pred']  # [B, L, H, W]
+                weight_map = weight_map.permute(0, 2, 3, 1)  # [B, H, W, L]
+                weight_flat = weight_map.reshape(-1, weight_map.shape[-1])
+                if clip_feat is not None:
+                    clip_feat = self._resize_teacher(clip_feat, weight_map.shape[1], weight_map.shape[2])
+                    clip_codebook = data['semantics']['S_clip']  # [L, D_clip]
+                    clip_pred = weight_flat @ clip_codebook
+                    clip_pred = clip_pred.view(weight_map.shape[0], weight_map.shape[1], weight_map.shape[2], -1)
+                    if self.use_proj_head:
+                        clip_pred = self.proj_clip(clip_pred)
+                        clip_feat = self.proj_clip(clip_feat)
+                    loss_sem_clip = self._semantic_distill_loss(clip_pred, clip_feat)
+                    loss += self.lambda_sem_clip * loss_sem_clip
+                if dino_feat is not None:
+                    dino_feat = self._resize_teacher(dino_feat, weight_map.shape[1], weight_map.shape[2])
+                    dino_codebook = data['semantics']['S_dino']  # [L, D_dino]
+                    dino_pred = weight_flat @ dino_codebook
+                    dino_pred = dino_pred.view(weight_map.shape[0], weight_map.shape[1], weight_map.shape[2], -1)
+                    if self.use_proj_head:
+                        dino_pred = self.proj_dino(dino_pred)
+                        dino_feat = self.proj_dino(dino_feat)
+                    loss_sem_dino = self._semantic_distill_loss(dino_pred, dino_feat)
+                    loss += self.lambda_sem_dino * loss_sem_dino
+
             # next frame prediction
             if self.use_dynamic_field and (next_gt_rgb is not None) and ('xyz_maps' in data['next']):
                 data['next'] = self.pts2render(data['next'], bg_color=self.bg_color)
@@ -327,6 +390,46 @@ class NeuralRenderer(nn.Module):
                 loss_dyna = l2_loss(next_render_novel, next_gt_rgb)
                 lambda_dyna = self.cfg.lambda_dyna if step >= self.cfg.next_mlp.warm_up else 0.
                 loss += lambda_dyna * loss_dyna
+
+                if (self.use_sparse_semantics and self.use_future_sem_loss
+                        and 'semantics' in data['next']
+                        and (next_clip_feat is not None or next_dino_feat is not None)):
+                    start_time = time.perf_counter()
+                    next_weight_map = data['next']['novel_view']['embed_pred']  # [B, L, H, W]
+                    next_weight_map = next_weight_map.permute(0, 2, 3, 1)  # [B, H, W, L]
+                    next_weight_flat = next_weight_map.reshape(-1, next_weight_map.shape[-1])
+                    next_clip_loss = torch.tensor(0., device=rgb.device)
+                    next_dino_loss = torch.tensor(0., device=rgb.device)
+                    if next_clip_feat is not None:
+                        next_clip_feat = self._resize_teacher(
+                            next_clip_feat, next_weight_map.shape[1], next_weight_map.shape[2]
+                        )
+                        clip_codebook = data['next']['semantics']['S_clip']
+                        next_clip_pred = next_weight_flat @ clip_codebook
+                        next_clip_pred = next_clip_pred.view(
+                            next_weight_map.shape[0], next_weight_map.shape[1], next_weight_map.shape[2], -1
+                        )
+                        if self.use_proj_head:
+                            next_clip_pred = self.proj_clip(next_clip_pred)
+                            next_clip_feat = self.proj_clip(next_clip_feat)
+                        next_clip_loss = self._semantic_distill_loss(next_clip_pred, next_clip_feat)
+                        loss += self.lambda_future_sem * next_clip_loss
+                    if next_dino_feat is not None:
+                        next_dino_feat = self._resize_teacher(
+                            next_dino_feat, next_weight_map.shape[1], next_weight_map.shape[2]
+                        )
+                        dino_codebook = data['next']['semantics']['S_dino']
+                        next_dino_pred = next_weight_flat @ dino_codebook
+                        next_dino_pred = next_dino_pred.view(
+                            next_weight_map.shape[0], next_weight_map.shape[1], next_weight_map.shape[2], -1
+                        )
+                        if self.use_proj_head:
+                            next_dino_pred = self.proj_dino(next_dino_pred)
+                            next_dino_feat = self.proj_dino(next_dino_feat)
+                        next_dino_loss = self._semantic_distill_loss(next_dino_pred, next_dino_feat)
+                        loss += self.lambda_future_sem * next_dino_loss
+                    loss_future_sem = next_clip_loss + next_dino_loss
+                    future_sem_time = time.perf_counter() - start_time
 
                 loss_reg = torch.tensor(0.)
                 # TODO: regularization on deformation
@@ -345,6 +448,10 @@ class NeuralRenderer(nn.Module):
                 'loss': loss,
                 'loss_rgb': loss_rgb.item(),
                 'loss_embed': loss_embed.item(),
+                'loss_sem_clip': loss_sem_clip.item(),
+                'loss_sem_dino': loss_sem_dino.item(),
+                'loss_future_sem': loss_future_sem.item(),
+                'future_sem_time': future_sem_time,
                 'loss_dyna': loss_dyna.item(),
                 'loss_reg': loss_reg.item(),
                 'l1': Ll1.item(),
@@ -368,6 +475,10 @@ class NeuralRenderer(nn.Module):
                     'loss': 0.,
                     'loss_rgb': 0.,
                     'loss_embed': 0.,
+                    'loss_sem_clip': 0.,
+                    'loss_sem_dino': 0.,
+                    'loss_future_sem': 0.,
+                    'future_sem_time': 0.0,
                     'loss_dyna': 0.,
                     'loss_reg': 0.,
                     'l1': 0.,
@@ -391,10 +502,30 @@ class NeuralRenderer(nn.Module):
         scale_i = data['scale_maps'][i, :, :]
         opacity_i = data['opacity_maps'][i, :, :]
         feature_language_i = data['feature_maps'][i, :, :]
+        feature_language_topk = None
+        feature_language_indices = None
+        feature_dim = 0
+        topk_k = 0
+        sem_render_mode = "dense"
+        if self.use_sparse_semantics and self.sem_render_mode == "sparse" and 'semantics' in data:
+            feature_language_i = None
+            feature_language_topk = data['semantics']['topk_val'][i]
+            feature_language_indices = data['semantics']['topk_idx'][i].to(torch.int32)
+            feature_dim = self.sem_L
+            topk_k = self.sem_K
+            sem_render_mode = "sparse"
 
         render_return_dict = render(
             data, i, xyz_i, rot_i, scale_i, opacity_i, 
-            bg_color=bg_color, pts_rgb=None, features_color=feature_i, features_language=feature_language_i
+            bg_color=bg_color,
+            pts_rgb=None,
+            features_color=feature_i,
+            features_language=feature_language_i,
+            features_language_topk=feature_language_topk,
+            features_language_indices=feature_language_indices,
+            feature_dim=feature_dim,
+            topk_k=topk_k,
+            sem_render_mode=sem_render_mode,
             )
 
         data['novel_view']['img_pred'] = render_return_dict['render'].unsqueeze(0)

@@ -129,6 +129,46 @@ def parse_depth_file(file_path):
     return depth
 
 
+def parse_feature_file(file_path, feature_key=None):
+    """
+    Load cached teacher feature map.
+    Supports .npz with key 'feat' or 'clip_feat'/'dino_feat', or .pt tensors.
+    Returns np.ndarray with shape (H, W, D).
+    """
+    if file_path is None:
+        return None
+    if file_path.endswith('.npz'):
+        data = np.load(file_path)
+        if feature_key is not None and feature_key in data:
+            feat = data[feature_key]
+        elif 'feat' in data:
+            feat = data['feat']
+        elif 'clip_feat' in data:
+            feat = data['clip_feat']
+        elif 'dino_feat' in data:
+            feat = data['dino_feat']
+        else:
+            feat = data[list(data.keys())[0]]
+        return feat.astype(np.float32)
+    if file_path.endswith('.pt'):
+        feat = torch.load(file_path, map_location='cpu')
+        if isinstance(feat, dict):
+            if feature_key is not None and feature_key in feat:
+                feat = feat[feature_key]
+            elif 'feat' in feat:
+                feat = feat['feat']
+            elif 'clip_feat' in feat:
+                feat = feat['clip_feat']
+            elif 'dino_feat' in feat:
+                feat = feat['dino_feat']
+            else:
+                feat = next(iter(feat.values()))
+        if isinstance(feat, torch.Tensor):
+            feat = feat.detach().cpu().numpy()
+        return feat.astype(np.float32)
+    raise ValueError(f"Unsupported feature cache format: {file_path}")
+
+
 class QFunction(nn.Module):
 
     def __init__(self,
@@ -196,6 +236,8 @@ class QFunction(nn.Module):
                 lang_goal=None,
                 nerf_next_target_rgb=None, nerf_next_target_pose=None, nerf_next_target_depth=None,
                 nerf_next_target_camera_intrinsic=None,
+                nerf_target_clip_feat=None, nerf_target_dino_feat=None,
+                nerf_next_target_clip_feat=None, nerf_next_target_dino_feat=None,
                 gt_embed=None, step=None, action=None):
         '''
         Return Q-functions and neural rendering loss
@@ -268,6 +310,10 @@ class QFunction(nn.Module):
                     lang_goal=lang_goal, 
                     next_gt_pose=nerf_next_target_pose, next_gt_intrinsic=nerf_next_target_camera_intrinsic, 
                     next_gt_rgb=nerf_next_target_rgb, step=step, action=action,
+                    clip_feat=nerf_target_clip_feat,
+                    dino_feat=nerf_target_dino_feat,
+                    next_clip_feat=nerf_next_target_clip_feat,
+                    next_dino_feat=nerf_next_target_dino_feat,
                     training=True,
                     )
 
@@ -680,10 +726,24 @@ class QAttentionPerActBCAgent(Agent):
         nerf_multi_view_rgb_path = replay_sample['nerf_multi_view_rgb'] # only succeed to get path sometime
         nerf_multi_view_depth_path = replay_sample['nerf_multi_view_depth']
         nerf_multi_view_camera_path = replay_sample['nerf_multi_view_camera']
+        nerf_multi_view_clip_feat_path = replay_sample.get('nerf_multi_view_clip_feat', None)
+        nerf_multi_view_dino_feat_path = replay_sample.get('nerf_multi_view_dino_feat', None)
+        if not self.cfg.neural_renderer.use_sparse_semantics:
+            nerf_multi_view_clip_feat_path = None
+            nerf_multi_view_dino_feat_path = None
 
         nerf_next_multi_view_rgb_path = replay_sample['nerf_next_multi_view_rgb']
         nerf_next_multi_view_depth_path = replay_sample['nerf_next_multi_view_depth']
         nerf_next_multi_view_camera_path = replay_sample['nerf_next_multi_view_camera']
+        nerf_next_multi_view_clip_feat_path = replay_sample.get('nerf_next_multi_view_clip_feat', None)
+        nerf_next_multi_view_dino_feat_path = replay_sample.get('nerf_next_multi_view_dino_feat', None)
+        if not (self.cfg.neural_renderer.use_sparse_semantics and self.cfg.neural_renderer.use_future_sem_loss):
+            nerf_next_multi_view_clip_feat_path = None
+            nerf_next_multi_view_dino_feat_path = None
+        nerf_target_clip_feat = None
+        nerf_target_dino_feat = None
+        nerf_next_target_clip_feat = None
+        nerf_next_target_dino_feat = None
 
         if nerf_multi_view_rgb_path is None or nerf_multi_view_rgb_path[0,0] is None:
             cprint(nerf_multi_view_rgb_path, 'red')
@@ -706,37 +766,73 @@ class QAttentionPerActBCAgent(Agent):
             nerf_multi_view_rgb_path = nerf_multi_view_rgb_path[:, view_dix]
             nerf_multi_view_depth_path = nerf_multi_view_depth_path[:, view_dix]
             nerf_multi_view_camera_path = nerf_multi_view_camera_path[:, view_dix]
+            if nerf_multi_view_clip_feat_path is not None:
+                nerf_multi_view_clip_feat_path = nerf_multi_view_clip_feat_path[:, view_dix]
+            if nerf_multi_view_dino_feat_path is not None:
+                nerf_multi_view_dino_feat_path = nerf_multi_view_dino_feat_path[:, view_dix]
 
             next_view_dix = np.random.randint(0, num_view_by_user)
             nerf_next_multi_view_rgb_path = nerf_next_multi_view_rgb_path[:, next_view_dix]
             nerf_next_multi_view_depth_path = nerf_next_multi_view_depth_path[:, next_view_dix]
             nerf_next_multi_view_camera_path = nerf_next_multi_view_camera_path[:, next_view_dix]
+            if nerf_next_multi_view_clip_feat_path is not None:
+                nerf_next_multi_view_clip_feat_path = nerf_next_multi_view_clip_feat_path[:, next_view_dix]
+            if nerf_next_multi_view_dino_feat_path is not None:
+                nerf_next_multi_view_dino_feat_path = nerf_next_multi_view_dino_feat_path[:, next_view_dix]
 
             # load img and camera (support bs>1)
             nerf_target_rgbs, nerf_target_depths, nerf_target_camera_extrinsics, nerf_target_camera_intrinsics = [], [], [], []
+            nerf_target_clip_feats, nerf_target_dino_feats = [], []
             nerf_next_target_rgbs, nerf_next_target_depths, nerf_next_target_camera_extrinsics, nerf_next_target_camera_intrinsics = [], [], [], []
+            nerf_next_target_clip_feats, nerf_next_target_dino_feats = [], []
             for i in range(bs):
                 nerf_target_rgbs.append(parse_img_file(nerf_multi_view_rgb_path[i], mask_gt_rgb=self._mask_gt_rgb))#, session=self._rembg_session))    # FIXME: file_path 'NoneType' object has no attribute 'read'
                 nerf_target_depths.append(parse_depth_file(nerf_multi_view_depth_path[i]))
                 nerf_target_camera_extrinsic, nerf_target_camera_intrinsic, nerf_target_focal = parse_camera_file(nerf_multi_view_camera_path[i])
                 nerf_target_camera_extrinsics.append(nerf_target_camera_extrinsic)
                 nerf_target_camera_intrinsics.append(nerf_target_camera_intrinsic)
+                if nerf_multi_view_clip_feat_path is not None:
+                    nerf_target_clip_feats.append(
+                        parse_feature_file(nerf_multi_view_clip_feat_path[i], feature_key='clip_feat')
+                    )
+                if nerf_multi_view_dino_feat_path is not None:
+                    nerf_target_dino_feats.append(
+                        parse_feature_file(nerf_multi_view_dino_feat_path[i], feature_key='dino_feat')
+                    )
 
                 nerf_next_target_rgbs.append(parse_img_file(nerf_next_multi_view_rgb_path[i], mask_gt_rgb=self._mask_gt_rgb))#, session=self._rembg_session))    # FIXME: file_path 'NoneType' object has no attribute 'read'
                 nerf_next_target_depths.append(parse_depth_file(nerf_next_multi_view_depth_path[i]))
                 nerf_next_target_camera_extrinsic, nerf_next_target_camera_intrinsic, nerf_next_target_focal = parse_camera_file(nerf_next_multi_view_camera_path[i])
                 nerf_next_target_camera_extrinsics.append(nerf_next_target_camera_extrinsic)
                 nerf_next_target_camera_intrinsics.append(nerf_next_target_camera_intrinsic)
+                if nerf_next_multi_view_clip_feat_path is not None:
+                    nerf_next_target_clip_feats.append(
+                        parse_feature_file(nerf_next_multi_view_clip_feat_path[i], feature_key='clip_feat')
+                    )
+                if nerf_next_multi_view_dino_feat_path is not None:
+                    nerf_next_target_dino_feats.append(
+                        parse_feature_file(nerf_next_multi_view_dino_feat_path[i], feature_key='dino_feat')
+                    )
 
             nerf_target_rgb = torch.from_numpy(np.stack(nerf_target_rgbs)).float().to(device) # [bs, H, W, 3], [0,1]
             nerf_target_depth = torch.from_numpy(np.stack(nerf_target_depths)).float().to(device) # [bs, H, W, 1], no normalization
             nerf_target_camera_extrinsic = torch.from_numpy(np.stack(nerf_target_camera_extrinsics)).float().to(device)
             nerf_target_camera_intrinsic = torch.from_numpy(np.stack(nerf_target_camera_intrinsics)).float().to(device)
+            nerf_target_clip_feat = None
+            nerf_target_dino_feat = None
+            if nerf_target_clip_feats:
+                nerf_target_clip_feat = torch.from_numpy(np.stack(nerf_target_clip_feats)).float().to(device)
+            if nerf_target_dino_feats:
+                nerf_target_dino_feat = torch.from_numpy(np.stack(nerf_target_dino_feats)).float().to(device)
 
             nerf_next_target_rgb = torch.from_numpy(np.stack(nerf_next_target_rgbs)).float().to(device) # [bs, H, W, 3], [0,1]
             nerf_next_target_depth = torch.from_numpy(np.stack(nerf_next_target_depths)).float().to(device) # [bs, H, W, 1], no normalization
             nerf_next_target_camera_extrinsic = torch.from_numpy(np.stack(nerf_next_target_camera_extrinsics)).float().to(device)
             nerf_next_target_camera_intrinsic = torch.from_numpy(np.stack(nerf_next_target_camera_intrinsics)).float().to(device)
+            if nerf_next_target_clip_feats:
+                nerf_next_target_clip_feat = torch.from_numpy(np.stack(nerf_next_target_clip_feats)).float().to(device)
+            if nerf_next_target_dino_feats:
+                nerf_next_target_dino_feat = torch.from_numpy(np.stack(nerf_next_target_dino_feats)).float().to(device)
 
         bounds = self._coordinate_bounds.to(device)
         if self._layer > 0:
@@ -791,6 +887,8 @@ class QAttentionPerActBCAgent(Agent):
                                 nerf_next_target_depth=nerf_next_target_depth,
                                 nerf_next_target_pose=nerf_next_target_camera_extrinsic,
                                 nerf_next_target_camera_intrinsic=nerf_next_target_camera_intrinsic,
+                                nerf_target_clip_feat=nerf_target_clip_feat,
+                                nerf_target_dino_feat=nerf_target_dino_feat,
                                 step=step,
                                 action=action_gt,
                                 )
@@ -866,6 +964,10 @@ class QAttentionPerActBCAgent(Agent):
             # for print
             loss_rgb_item = rendering_loss_dict['loss_rgb']
             loss_embed_item = rendering_loss_dict['loss_embed']
+            loss_sem_clip_item = rendering_loss_dict.get('loss_sem_clip', 0.0)
+            loss_sem_dino_item = rendering_loss_dict.get('loss_sem_dino', 0.0)
+            loss_future_sem_item = rendering_loss_dict.get('loss_future_sem', 0.0)
+            future_sem_time_item = rendering_loss_dict.get('future_sem_time', 0.0)
             loss_dyna_item = rendering_loss_dict['loss_dyna']
             loss_reg_item = rendering_loss_dict['loss_reg']
             psnr = rendering_loss_dict['psnr']
@@ -884,6 +986,10 @@ L_grip: {q_grip_loss.item():.3f} x {(self._grip_loss_weight * lambda_BC):.3f} | 
 L_col: {q_collision_loss.item():.3f} x {(self._collision_loss_weight * lambda_BC):.3f} | \
 L_rgb: {loss_rgb_item:.3f} x {lambda_rgb:.3f} | \
 L_embed: {loss_embed_item:.3f} x {lambda_embed:.4f} | \
+L_sem_clip: {loss_sem_clip_item:.3f} | \
+L_sem_dino: {loss_sem_dino_item:.3f} | \
+L_sem_future: {loss_future_sem_item:.3f} | \
+T_sem_future: {future_sem_time_item:.4f}s | \
 L_dyna: {loss_dyna_item:.3f} x {lambda_dyna:.4f} | \
 L_reg: {loss_reg_item:.3f} x {lambda_reg:.4f} | \
 psnr: {psnr:.3f}', 'green')
@@ -894,6 +1000,10 @@ psnr: {psnr:.3f}', 'green')
                         'train/psnr':psnr, 
                         'train/rgb_loss':loss_rgb_item,
                         'train/embed_loss':loss_embed_item,
+                        'train/sem_clip_loss':loss_sem_clip_item,
+                        'train/sem_dino_loss':loss_sem_dino_item,
+                        'train/sem_future_loss':loss_future_sem_item,
+                        'train/sem_future_time':future_sem_time_item,
                         'train/dyna_loss':loss_dyna_item,
                         }, step=step)
             
@@ -936,13 +1046,15 @@ L_col: {q_collision_loss.item():.3f} x {(self._collision_loss_weight * lambda_BC
                 tgt_intrinsic=nerf_target_camera_intrinsic,
                 nerf_target_rgb=nerf_target_rgb,
                 lang_goal=lang_goal,
-                nerf_next_target_rgb=nerf_next_target_rgb,
-                nerf_next_target_depth=nerf_next_target_depth,
-                nerf_next_target_pose=nerf_next_target_camera_extrinsic,
-                nerf_next_target_camera_intrinsic=nerf_next_target_camera_intrinsic,
-                step=step,
-                action=action_gt,
-                )
+                                nerf_next_target_rgb=nerf_next_target_rgb,
+                                nerf_next_target_depth=nerf_next_target_depth,
+                                nerf_next_target_pose=nerf_next_target_camera_extrinsic,
+                                nerf_next_target_camera_intrinsic=nerf_next_target_camera_intrinsic,
+                                nerf_next_target_clip_feat=nerf_next_target_clip_feat,
+                                nerf_next_target_dino_feat=nerf_next_target_dino_feat,
+                                step=step,
+                                action=action_gt,
+                                )
             
             # NOTE: [1, h, w, 3]
             rgb_gt = nerf_target_rgb[0]
