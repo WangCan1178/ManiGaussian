@@ -82,6 +82,10 @@ def create_replay(batch_size: int, timesteps: int,
         ObservationElement('nerf_multi_view_depth', (num_view_for_nerf,), np.object_))
     observation_elements.append(
         ObservationElement('nerf_multi_view_camera', (num_view_for_nerf,), np.object_))
+    observation_elements.append(
+        ObservationElement('nerf_multi_view_clip_feat', (num_view_for_nerf,), np.object_))
+    observation_elements.append(
+        ObservationElement('nerf_multi_view_dino_feat', (num_view_for_nerf,), np.object_))
     
     # for next nerf
     observation_elements.append(
@@ -90,6 +94,10 @@ def create_replay(batch_size: int, timesteps: int,
         ObservationElement('nerf_next_multi_view_depth', (num_view_for_nerf,), np.object_))
     observation_elements.append(
         ObservationElement('nerf_next_multi_view_camera', (num_view_for_nerf,), np.object_))
+    observation_elements.append(
+        ObservationElement('nerf_next_multi_view_clip_feat', (num_view_for_nerf,), np.object_))
+    observation_elements.append(
+        ObservationElement('nerf_next_multi_view_dino_feat', (num_view_for_nerf,), np.object_))
 
     # discretized translation, discretized rotation, discrete ignore collision, 6-DoF gripper pose, and pre-trained language embeddings
     observation_elements.extend([

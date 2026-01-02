@@ -38,6 +38,7 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& means3D,
     const torch::Tensor& colors,
 	const torch::Tensor& language_feature, // 增加了新的参数
+	const torch::Tensor& language_feature_indices,
     const torch::Tensor& opacity,
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
@@ -54,7 +55,10 @@ RasterizeGaussiansCUDA(
 	const torch::Tensor& campos,
 	const bool prefiltered,
 	const bool debug,
-	const bool include_feature)
+	const bool include_feature,
+	const int feature_dim,
+	const int topk_k,
+	const bool use_sparse_feature)
 {
   if (means3D.ndimension() != 2 || means3D.size(1) != 3) {
     AT_ERROR("means3D must have dimensions (num_points, 3)");
@@ -70,7 +74,10 @@ RasterizeGaussiansCUDA(
   torch::Tensor out_color = torch::full({NUM_CHANNELS, H, W}, 0.0, float_opts);
   torch::Tensor out_language_feature;
   if (include_feature) {
-	out_language_feature = torch::full({NUM_CHANNELS_language_feature, H, W}, 0.0, float_opts);
+	if (feature_dim <= 0) {
+		AT_ERROR("feature_dim must be positive when include_feature is true");
+	}
+	out_language_feature = torch::full({feature_dim, H, W}, 0.0, float_opts);
 	// out_language_feature = torch::full({1}, 0.0, float_opts);
   }
   else {
@@ -107,6 +114,7 @@ RasterizeGaussiansCUDA(
 		sh.contiguous().data_ptr<float>(),
 		colors.contiguous().data<float>(), 
 		language_feature.contiguous().data<float>(),
+		language_feature_indices.contiguous().data_ptr<int>(),
 		opacity.contiguous().data<float>(), 
 		scales.contiguous().data_ptr<float>(),
 		scale_modifier,
@@ -122,7 +130,10 @@ RasterizeGaussiansCUDA(
 		out_language_feature.contiguous().data<float>(),
 		radii.contiguous().data<int>(),
 		debug,
-		include_feature);
+		include_feature,
+		feature_dim,
+		topk_k,
+		use_sparse_feature);
   }
   return std::make_tuple(rendered, out_color, out_language_feature, radii, geomBuffer, binningBuffer, imgBuffer);
 }
@@ -132,8 +143,9 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
  	const torch::Tensor& background,
 	const torch::Tensor& means3D,
 	const torch::Tensor& radii,
-    const torch::Tensor& colors,
+	const torch::Tensor& colors,
 	const torch::Tensor& language_feature,
+	const torch::Tensor& language_feature_indices,
 	const torch::Tensor& scales,
 	const torch::Tensor& rotations,
 	const float scale_modifier,
@@ -152,7 +164,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	const torch::Tensor& binningBuffer,
 	const torch::Tensor& imageBuffer,
 	const bool debug,
-	const bool include_feature) 
+	const bool include_feature,
+	const int feature_dim,
+	const int topk_k,
+	const bool use_sparse_feature) 
 {
   const int P = means3D.size(0);
   const int H = dL_dout_color.size(1);
@@ -170,7 +185,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 
   torch::Tensor dL_dlanguage_feature;
   if (include_feature) {
-	dL_dlanguage_feature = torch::zeros({P, NUM_CHANNELS_language_feature}, means3D.options());
+	if (feature_dim <= 0) {
+		AT_ERROR("feature_dim must be positive when include_feature is true");
+	}
+	dL_dlanguage_feature = torch::zeros({P, language_feature.size(1)}, means3D.options());
 	// dL_dlanguage_feature = torch::zeros({1}, means3D.options());
   } else {
 	dL_dlanguage_feature = torch::zeros({1}, means3D.options());
@@ -192,6 +210,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  sh.contiguous().data<float>(),
 	  colors.contiguous().data<float>(),
 	  language_feature.contiguous().data<float>(),
+	  language_feature_indices.contiguous().data_ptr<int>(),
 	  scales.data_ptr<float>(),
 	  scale_modifier,
 	  rotations.data_ptr<float>(),
@@ -218,7 +237,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor, torch::Tensor, torch::Te
 	  dL_dscales.contiguous().data<float>(),
 	  dL_drotations.contiguous().data<float>(),
 	  debug,
-	  include_feature);
+	  include_feature,
+	  feature_dim,
+	  topk_k,
+	  use_sparse_feature);
   }
 
   return std::make_tuple(dL_dmeans2D, dL_dcolors, dL_dlanguage_feature, dL_dopacity, dL_dmeans3D, dL_dcov3D, dL_dsh, dL_dscales, dL_drotations);

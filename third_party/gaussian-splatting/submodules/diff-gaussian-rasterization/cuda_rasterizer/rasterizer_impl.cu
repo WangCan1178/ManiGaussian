@@ -205,7 +205,8 @@ int CudaRasterizer::Rasterizer::forward(
 	const float* means3D,
 	const float* shs,
 	const float* colors_precomp,
-	const float* language_feature_precomp, // 增加了参数
+	const float* language_feature_precomp,
+	const int* language_feature_indices,
 	const float* opacities,
 	const float* scales,
 	const float scale_modifier,
@@ -220,7 +221,10 @@ int CudaRasterizer::Rasterizer::forward(
 	float* out_language_feature,
 	int* radii,
 	bool debug,
-	bool include_feature)
+	bool include_feature,
+	int feature_dim,
+	int topk_k,
+	bool use_sparse_feature)
 {
 	const float focal_y = height / (2.0f * tan_fovy);
 	const float focal_x = width / (2.0f * tan_fovx);
@@ -232,6 +236,17 @@ int CudaRasterizer::Rasterizer::forward(
 	if (radii == nullptr)
 	{
 		radii = geomState.internal_radii;
+	}
+	if (include_feature)
+	{
+		if (feature_dim > MAX_LANGUAGE_FEATURES)
+		{
+			throw std::runtime_error("feature_dim exceeds MAX_LANGUAGE_FEATURES");
+		}
+		if (use_sparse_feature && topk_k > MAX_TOPK)
+		{
+			throw std::runtime_error("topk_k exceeds MAX_TOPK");
+		}
 	}
 
 	dim3 tile_grid((width + BLOCK_X - 1) / BLOCK_X, (height + BLOCK_Y - 1) / BLOCK_Y, 1);
@@ -245,6 +260,17 @@ int CudaRasterizer::Rasterizer::forward(
 	if (NUM_CHANNELS != 3 && colors_precomp == nullptr)
 	{
 		throw std::runtime_error("For non-RGB, provide precomputed Gaussian colors!");
+	}
+	if (include_feature)
+	{
+		if (feature_dim > MAX_LANGUAGE_FEATURES)
+		{
+			throw std::runtime_error("feature_dim exceeds MAX_LANGUAGE_FEATURES");
+		}
+		if (use_sparse_feature && topk_k > MAX_TOPK)
+		{
+			throw std::runtime_error("topk_k exceeds MAX_TOPK");
+		}
 	}
 
 	// Run preprocessing per-Gaussian (transformation, bounding, conversion of SHs to RGB)
@@ -338,13 +364,17 @@ int CudaRasterizer::Rasterizer::forward(
 		geomState.means2D,
 		feature_ptr,
 		language_feature_ptr,
+		language_feature_indices,
 		geomState.conic_opacity,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		background,
 		out_color,
 		out_language_feature,
-		include_feature), debug) // 增加了参数
+		feature_dim,
+		topk_k,
+		include_feature,
+		use_sparse_feature), debug)
 
 
 	// cudaEventRecord(stop, stream);
@@ -364,6 +394,7 @@ void CudaRasterizer::Rasterizer::backward(
 	const float* shs,
 	const float* colors_precomp,
 	const float* language_feature_precomp,
+	const int* language_feature_indices,
 	const float* scales,
 	const float scale_modifier,
 	const float* rotations,
@@ -389,7 +420,10 @@ void CudaRasterizer::Rasterizer::backward(
 	float* dL_dscale,
 	float* dL_drot,
 	bool debug,
-	bool include_feature)
+	bool include_feature,
+	int feature_dim,
+	int topk_k,
+	bool use_sparse_feature)
 {
 	GeometryState geomState = GeometryState::fromChunk(geom_buffer, P);
 	BinningState binningState = BinningState::fromChunk(binning_buffer, R);
@@ -423,6 +457,7 @@ void CudaRasterizer::Rasterizer::backward(
 		geomState.conic_opacity,
 		color_ptr,
 		language_feature_ptr,
+		language_feature_indices,
 		imgState.accum_alpha,
 		imgState.n_contrib,
 		dL_dpix,
@@ -432,7 +467,10 @@ void CudaRasterizer::Rasterizer::backward(
 		dL_dopacity,
 		dL_dcolor,
 		dL_dlanguage_feature,
-		include_feature), debug)
+		feature_dim,
+		topk_k,
+		include_feature,
+		use_sparse_feature), debug)
 
 	// Take care of the rest of preprocessing. Was the precomputed covariance
 	// given to us or a scales/rot pair? If precomputed, pass that. If not,

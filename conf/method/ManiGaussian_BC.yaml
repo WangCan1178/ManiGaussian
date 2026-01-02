@@ -117,6 +117,19 @@ neural_renderer:
   d_latent: 128
   
   d_lang: 128
+
+  use_sparse_semantics: False
+  sem_render_mode: sparse
+  sem_L: 64
+  sem_K: 4
+  D_clip: 512
+  D_dino: 1024
+  lambda_sem_clip: 0.0
+  lambda_sem_dino: 0.0
+  use_future_sem_loss: False
+  lambda_future_sem: 0.0
+  use_proj_head: False
+  proj_dim: 256
   
   voxel_shape: 100
   image_width: 128
@@ -160,10 +173,6 @@ neural_renderer:
     num_freqs: 6
     freq_factor: 1.5
     include_input: True
-
-
-
-
 
 
 
